@@ -25,7 +25,8 @@ class Base:
         reactants = copy.deepcopy(self.reactants)
         self._RemoveAtomMap(reactants)
         SMILES = Chem.MolToSmiles(CombineMols(reactants))
-        SMILES = re.sub('\[([A-Za-z])]', lambda x: x.group(1), SMILES)
+        # SMILES with '[C]' will be problematic when applying template on it
+        SMILES = re.sub('\[([CNOcno])]', lambda x: x.group(1), SMILES)
         return Chem.MolToSmiles(Chem.MolFromSmiles(SMILES))
 
     @property
@@ -39,7 +40,8 @@ class Base:
         products = copy.deepcopy(self.products)
         self._RemoveAtomMap(products)
         SMILES = Chem.MolToSmiles(CombineMols(products))
-        SMILES = re.sub('\[([A-Za-z])]', lambda x: x.group(1), SMILES)
+        # SMILES with '[C]' will be problematic when applying template on it
+        SMILES = re.sub('\[([CNOcno])]', lambda x: x.group(1), SMILES)
         return Chem.MolToSmiles(Chem.MolFromSmiles(SMILES))
 
     @property
