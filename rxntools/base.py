@@ -25,7 +25,8 @@ class Base:
         reactants = copy.deepcopy(self.reactants)
         self._RemoveAtomMap(reactants)
         SMILES = Chem.MolToSmiles(CombineMols(reactants))
-        return re.sub('\[([A-Za-z])]', lambda x: x.group(1), SMILES)
+        SMILES = re.sub('\[([A-Za-z])]', lambda x: x.group(1), SMILES)
+        return Chem.MolToSmiles(Chem.MolFromSmiles(SMILES))
 
     @property
     def products(self):
@@ -38,7 +39,8 @@ class Base:
         products = copy.deepcopy(self.products)
         self._RemoveAtomMap(products)
         SMILES = Chem.MolToSmiles(CombineMols(products))
-        return re.sub('\[([A-Za-z])]', lambda x: x.group(1), SMILES)
+        SMILES = re.sub('\[([A-Za-z])]', lambda x: x.group(1), SMILES)
+        return Chem.MolToSmiles(Chem.MolFromSmiles(SMILES))
 
     @property
     def agents(self):
@@ -46,15 +48,26 @@ class Base:
 
     @property
     def Smarts(self):
-        reactants_smarts = self._Mols2CanonicalSmarts(self.reactants)
-        reactants_smarts = self._AddChiralOnSmarts(
-            reactants_smarts, self.reactants_chirality_record)
-        products_smarts = self._Mols2CanonicalSmarts(self.products)
-        products_smarts = self._AddChiralOnSmarts(
-            products_smarts, self.products_chirality_record)
-        return reactants_smarts + '>' + \
-               self._Mols2CanonicalSmiles(self.agents) + '>' + \
-               products_smarts
+        if self.is_template:
+            reactants_smarts = self._Frag2CanonicalSmarts(self.reactants)
+            reactants_smarts = self._AddChiralOnSmarts(
+                reactants_smarts, self.reactants_chirality_record)
+            products_smarts = self._Frag2CanonicalSmarts(self.products)
+            products_smarts = self._AddChiralOnSmarts(
+                products_smarts, self.products_chirality_record)
+            return reactants_smarts + '>' + \
+                   self._Mols2CanonicalSmiles(self.agents) + '>' + \
+                   products_smarts
+        else:
+            reactants_smarts = self._Mols2CanonicalSmarts(self.reactants)
+            reactants_smarts = self._AddChiralOnSmarts(
+                reactants_smarts, self.reactants_chirality_record)
+            products_smarts = self._Mols2CanonicalSmarts(self.products)
+            products_smarts = self._AddChiralOnSmarts(
+                products_smarts, self.products_chirality_record)
+            return reactants_smarts + '>' + \
+                   self._Mols2CanonicalSmiles(self.agents) + '>' + \
+                   products_smarts
 
     @property
     def ReactingAtomsMN(self):
@@ -409,11 +422,7 @@ class Base:
             symbols = []
             for atom in mol.GetAtoms():
                 atoms_to_use.append(atom.GetIdx())
-                AMN = atom.GetPropsAsDict().get('molAtomMapNumber')
-                if AMN in self.ReactingAtomsMN:
-                    symbols.append(self._GetStrictAtomSmarts(atom))
-                else:
-                    symbols.append(self._GetGeneralAtomSmarts(atom))
+                symbols.append(atom.GetSmarts().replace('&', ';'))
             fragments.append('(' + Chem.MolFragmentToSmiles(
                 mol, atoms_to_use,
                 atomSymbols=symbols,

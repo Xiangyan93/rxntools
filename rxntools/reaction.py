@@ -6,15 +6,15 @@ from itertools import permutations
 
 
 class ChemicalReaction(Base):
-    def __init__(self, reaction_smarts, special_groups=[]):
+    def __init__(self, reaction_smarts):
         super().__init__(reaction_smarts=reaction_smarts, is_template=False)
         self.Sanitized()
         self.RearangeMols()
         self.GetChiralityInfo()
-        self.special_groups = special_groups
 
     # Functions used for extract reaction template.
-    def ExtractTemplate(self, validate=True):
+    def ExtractTemplate(self, special_groups=[], validate=True):
+        self.special_groups = special_groups
         reactant_fragments = self.__GetFragmentsForReactingAtoms(
             category='reactant', depth=1
         )
@@ -24,6 +24,8 @@ class ChemicalReaction(Base):
         )
         template_smarts = '{}>>{}'.format(reactant_fragments, product_fragments)
         template = ReactionTemplate(template_smarts)
+        template = ReactionTemplate(template.Smarts)
+        template.Check()
         if validate:
             if template.rxn.Validate()[1] != 0:
                 raise RuntimeError(
@@ -41,12 +43,12 @@ class ChemicalReaction(Base):
             if not SMILES_p in SMILES_template_p:
                 raise RuntimeError(
                     f'For chemical reaction:\n{self.reaction_smarts}\n'
-                    f'and extracted reaction template:\n{template_smarts}\n'
+                    f'and extracted reaction template:\n{template.Smarts}\n'
                     f'The true products:\n{SMILES_p}\n'
                     f'not in the products obtained by running the template\n{SMILES_template_p}'
                 )
             assert (SMILES_p in SMILES_template_p)
-        return template_smarts
+        return template.Smarts
 
     def __GetFragmentsForReactingAtoms(self, category, depth, expansion=[]):
         mols = self.reactants if category == 'reactant' else self.products
