@@ -15,7 +15,6 @@ class ChemicalReaction(Base):
 
     # Functions used for extract reaction template.
     def ExtractTemplate(self, validate=True):
-        changed_atom_tags = list(map(str, self.reacting_atoms_mn))
         reactant_fragments = self.__GetFragmentsForReactingAtoms(
             category='reactant', depth=1
         )
@@ -31,13 +30,9 @@ class ChemicalReaction(Base):
                     f'Could not validate reaction successfully. \n'
                     f'Input reaction smarts: {self.reaction_smarts}.\n'
                     f'Extracted reaction templates: {template_smarts}')
-            reactants = copy.copy(self.reactants)
-            self._RemoveAtomMap(reactants)
-            SMILES_r = list(map(Chem.MolToSmiles, reactants))
+            SMILES_r = self.reactants_SMILES.split('.')
             reactants = list(map(Chem.MolFromSmiles, SMILES_r))
-            products = copy.copy(self.products)
-            self._RemoveAtomMap(products)
-            SMILES_p = Chem.MolToSmiles(CombineMols(products))
+            SMILES_p = self.products_SMILES
             SMILES_template_p = []
             for reactants_ in list(permutations(reactants, len(reactants))):
                 template_products = template.rxn.RunReactants(reactants_)
@@ -46,12 +41,12 @@ class ChemicalReaction(Base):
             if not SMILES_p in SMILES_template_p:
                 raise RuntimeError(
                     f'For chemical reaction:\n{self.reaction_smarts}\n'
-                    f'and extracted reaction template:\n{template.Smarts}\n'
+                    f'and extracted reaction template:\n{template_smarts}\n'
                     f'The true products:\n{SMILES_p}\n'
-                    f'not in the products obtained by runing template\n{SMILES_template_p}'
+                    f'not in the products obtained by running the template\n{SMILES_template_p}'
                 )
             assert (SMILES_p in SMILES_template_p)
-        return template.Smarts
+        return template_smarts
 
     def __GetFragmentsForReactingAtoms(self, category, depth, expansion=[]):
         mols = self.reactants if category == 'reactant' else self.products
@@ -69,7 +64,7 @@ class ChemicalReaction(Base):
                 # Check self (only tagged atoms)
                 if getAtomMapNumber(atom) in self.ReactingAtomsMN:
                     atoms_to_use.append(atom.GetIdx())
-                    symbol = self.__GetAtomSmarts(atom)
+                    symbol = self._GetStrictAtomSmarts(atom)
                     if symbol != atom.GetSmarts():
                         symbol_replacements.append((atom.GetIdx(), symbol))
                     continue
@@ -95,7 +90,7 @@ class ChemicalReaction(Base):
                             atoms_to_use.append(atom.GetIdx())
                             # Make the expansion a wildcard
                             symbol_replacements.append(
-                                (atom.GetIdx(), self.__ConvertAtomToWildcard(atom)))
+                                (atom.GetIdx(), self._GetGeneralAtomSmarts(atom)))
 
             # Define new symbols to replace terminal species with wildcards
             # (don't want to restrict templates too strictly)
@@ -114,82 +109,6 @@ class ChemicalReaction(Base):
                 allBondsExplicit=True) + ')')
         fragments.sort()
         return '.'.join(fragments)
-
-    def __ExpandAtomsToSse(self, mol, atoms_to_use, groups,
-                           symbol_replacements):
-        '''Copy from Rdchiral'''
-
-        # Copy
-        new_atoms_to_use = atoms_to_use[:]
-        # Look for all atoms in the current list of atoms to use
-        for atom in mol.GetAtoms():
-            if atom.GetIdx() not in atoms_to_use:
-                continue
-            # Ensure membership of changed atom is checked against group
-            for group in groups:
-                if int(atom.GetIdx()) in group[0]:
-                    for idx in group[1]:
-                        if idx not in atoms_to_use:
-                            new_atoms_to_use.append(idx)
-                            symbol_replacements.append(
-                                (idx, self.__ConvertAtomToWildcard(
-                                    mol.GetAtomWithIdx(idx))))
-            # Look for all nearest neighbors of the currently-included atoms
-            for neighbor in atom.GetNeighbors():
-                # Evaluate nearest neighbor atom to determine what should be included
-                new_atoms_to_use, symbol_replacements = \
-                    self.__ExpandAtomsToUseAtom(
-                        new_atoms_to_use,
-                        neighbor,
-                        groups=groups,
-                        symbol_replacements=symbol_replacements)
-
-        return new_atoms_to_use, symbol_replacements
-
-    def __ExpandAtomsToUseAtom(self, atoms_to_use, atom, groups,
-                               symbol_replacements):
-        '''Copy from Rdchiral'''
-        found_in_group = False
-        for group in groups:  # first index is atom IDs for match, second is what to include
-            if atom.GetIdx() in group[0]:  # int correction
-                # Add the whole list, redundancies don't matter
-                # *but* still call convert_atom_to_wildcard!
-                for idx in group[1]:
-                    if idx not in atoms_to_use:
-                        atoms_to_use.append(idx)
-                        symbol_replacements.append(
-                            (idx, self.__ConvertAtomToWildcard(atom)))
-                found_in_group = True
-        if found_in_group:
-            return atoms_to_use, symbol_replacements
-
-        # How do we add an atom that wasn't in an identified important functional group?
-        # Develop generalized SMARTS symbol
-
-        # Skip current candidate atom if it is already included
-        if atom.GetIdx() in atoms_to_use:
-            return atoms_to_use, symbol_replacements
-
-        # Include this atom
-        atoms_to_use.append(atom.GetIdx())
-
-        # Look for suitable SMARTS replacement
-        symbol_replacements.append(
-            (atom.GetIdx(),
-             self.__ConvertAtomToWildcard(atom)))
-
-        return atoms_to_use, symbol_replacements
-
-    def __ExpandChangedAtomTags(self, reactant_fragments):
-        '''Copy from Rdchiral'''
-
-        expansion = []
-        atom_tags_in_reactant_fragments = re.findall('\:([0-9]+)\]',
-                                                     reactant_fragments)
-        for atom_tag in atom_tags_in_reactant_fragments:
-            if int(atom_tag) not in self.ReactingAtomsMN:
-                expansion.append(atom_tag)
-        return expansion
 
     def __GetSpecialGroups(self, mol):
         '''Copy from Rdchiral'''
@@ -253,74 +172,84 @@ class ChemicalReaction(Base):
         else:
             return self.special_groups
 
-    @staticmethod
-    def __ConvertAtomToWildcard(atom):
-        '''copy from Rdchiral'''
+    def __ExpandAtomsToSse(self, mol, atoms_to_use, groups,
+                           symbol_replacements):
+        '''Copy from Rdchiral'''
 
-        # Is this a terminal atom? We can tell if the degree is one
-        if atom.GetDegree() == 1:
-            symbol = '[' + atom.GetSymbol() + ';D1;H{}'.format(
-                atom.GetTotalNumHs())
-            if atom.GetFormalCharge() != 0:
-                charges = re.search('([-+]+[1-9]?)', atom.GetSmarts())
-                symbol = symbol.replace(';D1', ';{};D1'.format(charges.group()))
+        # Copy
+        new_atoms_to_use = atoms_to_use[:]
+        # Look for all atoms in the current list of atoms to use
+        for atom in mol.GetAtoms():
+            if atom.GetIdx() not in atoms_to_use:
+                continue
+            # Ensure membership of changed atom is checked against group
+            for group in groups:
+                if int(atom.GetIdx()) in group[0]:
+                    for idx in group[1]:
+                        if idx not in atoms_to_use:
+                            new_atoms_to_use.append(idx)
+                            symbol_replacements.append(
+                                (idx, self._GetGeneralAtomSmarts(
+                                    mol.GetAtomWithIdx(idx))))
+            # Look for all nearest neighbors of the currently-included atoms
+            for neighbor in atom.GetNeighbors():
+                # Evaluate nearest neighbor atom to determine what should be included
+                new_atoms_to_use, symbol_replacements = \
+                    self.__ExpandAtomsToUseAtom(
+                        new_atoms_to_use,
+                        neighbor,
+                        groups=groups,
+                        symbol_replacements=symbol_replacements)
 
-        else:
-            # Initialize
-            symbol = '['
+        return new_atoms_to_use, symbol_replacements
 
-            # Add atom primitive - atomic num and aromaticity (don't use COMPLETE wildcards)
-            if atom.GetAtomicNum() != 6:
-                symbol += '#{};'.format(atom.GetAtomicNum())
-                if atom.GetIsAromatic():
-                    symbol += 'a;'
-            elif atom.GetIsAromatic():
-                symbol += 'c;'
-            else:
-                symbol += 'C;'
+    def __ExpandAtomsToUseAtom(self, atoms_to_use, atom, groups,
+                               symbol_replacements):
+        '''Copy from Rdchiral'''
+        found_in_group = False
+        for group in groups:  # first index is atom IDs for match, second is what to include
+            if atom.GetIdx() in group[0]:  # int correction
+                # Add the whole list, redundancies don't matter
+                # *but* still call convert_atom_to_wildcard!
+                for idx in group[1]:
+                    if idx not in atoms_to_use:
+                        atoms_to_use.append(idx)
+                        symbol_replacements.append(
+                            (idx, self._GetGeneralAtomSmarts(atom)))
+                found_in_group = True
+        if found_in_group:
+            return atoms_to_use, symbol_replacements
 
-            # Charge is important
-            if atom.GetFormalCharge() != 0:
-                charges = re.search('([-+]+[1-9]?)', atom.GetSmarts())
-                if charges: symbol += charges.group() + ';'
+        # How do we add an atom that wasn't in an identified important functional group?
+        # Develop generalized SMARTS symbol
 
-            # Strip extra semicolon
-            if symbol[-1] == ';': symbol = symbol[:-1]
+        # Skip current candidate atom if it is already included
+        if atom.GetIdx() in atoms_to_use:
+            return atoms_to_use, symbol_replacements
 
-        # Close with label or with bracket
-        label = re.search('\:[0-9]+\]', atom.GetSmarts())
-        if label:
-            symbol += label.group()
-        else:
-            symbol += ']'
+        # Include this atom
+        atoms_to_use.append(atom.GetIdx())
 
-        return symbol
+        # Look for suitable SMARTS replacement
+        symbol_replacements.append(
+            (atom.GetIdx(),
+             self._GetGeneralAtomSmarts(atom)))
 
-    @staticmethod
-    def __GetAtomSmarts(atom):
-        symbol = atom.GetSmarts()
-        # Sometimes the Aromaticity of a atom is changed after sanitize, but its
-        # Smarts didnt updated.
-        if not atom.GetIsAromatic() and symbol[1].islower():
-            symbol = symbol[0] + symbol[1].upper() + symbol[2:]
-        # CUSTOM SYMBOL CHANGES
-        if atom.GetTotalNumHs() == 0:
-            # Be explicit when there are no hydrogens
-            if ':' in symbol:  # stick H0 before label
-                symbol = symbol.replace(':', ';H0:')
-            else:  # stick before end
-                symbol = symbol.replace(']', ';H0]')
+        return atoms_to_use, symbol_replacements
 
-        # print('Being explicit about H0!!!!')
-        if atom.GetFormalCharge() == 0:
-            # Also be explicit when there is no charge
-            if ':' in symbol:
-                symbol = symbol.replace(':', ';+0:')
-            else:
-                symbol = symbol.replace(']', ';+0]')
-        return symbol
+    def __ExpandChangedAtomTags(self, reactant_fragments):
+        '''Copy from Rdchiral'''
 
-    # Functions to automatically correct reactions.
+        expansion = []
+        atom_tags_in_reactant_fragments = re.findall('\:([0-9]+)\]',
+                                                     reactant_fragments)
+        for atom_tag in atom_tags_in_reactant_fragments:
+            if int(atom_tag) not in self.ReactingAtomsMN:
+                expansion.append(atom_tag)
+        return expansion
+
+    # # Functions to automatically correct reactions.
+    # Fix chiral issue.
     def FixChiralityInfo(self, rule):
         if rule == 'complete':
             self.__CompleteMissingChirality()
@@ -375,7 +304,9 @@ class ChemicalReaction(Base):
                     mols, mn)
                 acr = self._GetAtomChiralityRecord(atom_unchiral,
                                                    category2)
-                if '.'.join(list(map(str, record[1]))) == \
+                if acr is None:
+                    delete_keys.append(mn)
+                elif '.'.join(list(map(str, record[1]))) == \
                         '.'.join(list(map(str, acr[2]))):
                     if rule == 'complete':
                         records2[mn] = record
@@ -383,3 +314,14 @@ class ChemicalReaction(Base):
                         delete_keys.append(mn)
         for key in delete_keys:
             records1.pop(key)
+
+    # Check whether the reaction is trivial
+    def IsTrivial(self):
+        if self.reactants_SMILES == self.products_SMILES:
+            return True
+        else:
+            return False
+
+    # Check whether the output canonical smarts keep identical.
+    def Check(self):
+        assert (ChemicalReaction(self.Smarts).Smarts == self.Smarts)

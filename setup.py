@@ -31,7 +31,7 @@ setuptools.setup(
     author_email='1993.xiangyan@gmail.com',
     description='Chemical reaction cheminformatics tools',
     long_description=long_description,
-    url='https://gitlab.com/xiangyan93/rxntools',
+    url='https://github.com/xiangyan93/rxntools',
     packages=setuptools.find_packages(),
     classifiers=[
         'Programming Language :: Python',
