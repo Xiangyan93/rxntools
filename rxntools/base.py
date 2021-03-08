@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import warnings
+import copy
 import numpy as np
 from rdkit.Chem import rdChemReactions
 from.substructure import *
@@ -18,8 +19,30 @@ class Base:
         return list(self.rxn.GetReactants())
 
     @property
+    def reactants_SMILES(self):
+        if not self.reactants:
+            return None
+        reactants = copy.deepcopy(self.reactants)
+        self._RemoveAtomMap(reactants)
+        SMILES = Chem.MolToSmiles(CombineMols(reactants))
+        # SMILES with '[C]' will be problematic when applying template on it
+        SMILES = re.sub('\[([CNOcno])]', lambda x: x.group(1), SMILES)
+        return Chem.MolToSmiles(Chem.MolFromSmiles(SMILES))
+
+    @property
     def products(self):
         return list(self.rxn.GetProducts())
+
+    @property
+    def products_SMILES(self):
+        if not self.products:
+            return None
+        products = copy.deepcopy(self.products)
+        self._RemoveAtomMap(products)
+        SMILES = Chem.MolToSmiles(CombineMols(products))
+        # SMILES with '[C]' will be problematic when applying template on it
+        SMILES = re.sub('\[([CNOcno])]', lambda x: x.group(1), SMILES)
+        return Chem.MolToSmiles(Chem.MolFromSmiles(SMILES))
 
     @property
     def agents(self):
@@ -27,15 +50,26 @@ class Base:
 
     @property
     def Smarts(self):
-        reactants_smarts = self._Mols2CanonicalSmarts(self.reactants)
-        reactants_smarts = self._AddChiralOnSmarts(
-            reactants_smarts, self.reactants_chirality_record)
-        products_smarts = self._Mols2CanonicalSmarts(self.products)
-        products_smarts = self._AddChiralOnSmarts(
-            products_smarts, self.products_chirality_record)
-        return reactants_smarts + '>' + \
-               self._Mols2CanonicalSmiles(self.agents) + '>' + \
-               products_smarts
+        if self.is_template:
+            reactants_smarts = self._Frag2CanonicalSmarts(self.reactants)
+            reactants_smarts = self._AddChiralOnSmarts(
+                reactants_smarts, self.reactants_chirality_record)
+            products_smarts = self._Frag2CanonicalSmarts(self.products)
+            products_smarts = self._AddChiralOnSmarts(
+                products_smarts, self.products_chirality_record)
+            return reactants_smarts + '>' + \
+                   self._Mols2CanonicalSmiles(self.agents) + '>' + \
+                   products_smarts
+        else:
+            reactants_smarts = self._Mols2CanonicalSmarts(self.reactants)
+            reactants_smarts = self._AddChiralOnSmarts(
+                reactants_smarts, self.reactants_chirality_record)
+            products_smarts = self._Mols2CanonicalSmarts(self.products)
+            products_smarts = self._AddChiralOnSmarts(
+                products_smarts, self.products_chirality_record)
+            return reactants_smarts + '>' + \
+                   self._Mols2CanonicalSmiles(self.agents) + '>' + \
+                   products_smarts
 
     @property
     def ReactingAtomsMN(self):
@@ -91,11 +125,9 @@ class Base:
         for reactant in self.reactants:
             if not self._IsReactMol(reactant, self.ReactingAtomsMN):
                 self._RemoveAtomMap(reactant)
-                self.rxn.AddAgentTemplate(reactant)
         for product in self.products:
             if not self._IsReactMol(product, self.ReactingAtomsMN):
                 self._RemoveAtomMap(product)
-                self.rxn.AddAgentTemplate(product)
         self.rxn.RemoveUnmappedReactantTemplates(thresholdUnmappedAtoms=1e-5)
         self.rxn.RemoveUnmappedProductTemplates(thresholdUnmappedAtoms=1e-5)
 
@@ -147,9 +179,6 @@ class Base:
         # Sanitize all molecules.
         for mol in self.reactants + self.products + self.agents:
             Chem.SanitizeMol(mol)
-
-    def Update(self, object):
-        return object(self.Smarts)
 
     def _AddChiralOnSmarts(self, smarts, chirality_record):
         for mp, record in chirality_record.items():
@@ -250,7 +279,8 @@ class Base:
                                           f'{atom.GetSmarts()} in %s are not '
                                           'labeled, clear the ChiralTag.'
                                           % category)
-                            # atom.SetChiralTag(Chem.rdchem.ChiralType.CHI_UNSPECIFIED)
+                            warnings.warn(f'reaction smarts: {self.reaction_smarts}')
+                            atom.SetChiralTag(Chem.rdchem.ChiralType.CHI_UNSPECIFIED)
                         else:
                             chirality_record[acr[0]] = [acr[1], acr[2]]
         return chirality_record
@@ -269,7 +299,10 @@ class Base:
         else:
             smarts_string = self.reaction_smarts.split('>')[-1]
         atom_mp = atom.GetPropsAsDict().get('molAtomMapNumber')
-        atom_smarts = re.search('\[[0-9A-Za-z@:;&]+%d]' % atom_mp,
+        # there is a hydrogen
+        if len(neighbors_mn) == 3:
+            neighbors_mn.append(str(atom_mp))
+        atom_smarts = re.search('\[[0-9A-Za-z@:;&]+:%d]' % atom_mp,
                                 smarts_string)[0]
         if '@@' in atom_smarts:
             record1 = ChiralTag('@@')
@@ -351,7 +384,12 @@ class Base:
 
     @staticmethod
     def _Mols2CanonicalSmiles(mols):
-        fragments = list(map(Chem.MolToSmiles, mols))
+        fragments = []
+        for mol in mols:
+            smiles = Chem.MolToSmiles(mol)
+            if smiles == '[HH2-]':
+                smiles = '[H-]'
+            fragments.append(smiles)
         fragments.sort()
         return '.'.join(fragments)
 
@@ -359,12 +397,34 @@ class Base:
     def _Mols2CanonicalSmarts(mols):
         fragments = []
         for mol in mols:
+            fragments.append(Base._Mol2CanonicalSmarts(mol))
+        fragments.sort()
+        return '.'.join(fragments)
+
+    @staticmethod
+    def _Mol2CanonicalSmarts(mol):
+        atoms_to_use = []
+        symbols = []
+        for atom in mol.GetAtoms():
+            atoms_to_use.append(atom.GetIdx())
+            symbol = Base.__GetAtomSmarts(atom)
+            symbols.append(symbol)
+        smarts = Chem.MolFragmentToSmiles(
+            mol, atoms_to_use,
+            atomSymbols=symbols,
+            allHsExplicit=True,
+            isomericSmiles=True,
+            allBondsExplicit=False)
+        return smarts
+
+    def _Frag2CanonicalSmarts(self, mols):
+        fragments = []
+        for mol in mols:
             atoms_to_use = []
             symbols = []
             for atom in mol.GetAtoms():
                 atoms_to_use.append(atom.GetIdx())
-                symbol = atom.GetSmarts().replace('&', ';')
-                symbols.append(symbol)
+                symbols.append(atom.GetSmarts().replace('&', ';'))
             fragments.append('(' + Chem.MolFragmentToSmiles(
                 mol, atoms_to_use,
                 atomSymbols=symbols,
@@ -373,6 +433,107 @@ class Base:
                 allBondsExplicit=True) + ')')
         fragments.sort()
         return '.'.join(fragments)
+
+    @staticmethod
+    def __GetAtomSmarts(atom):
+        symbol = atom.GetSmarts()
+        rep = {
+            '&+': '+',
+            '&-': '-',
+            '&H1': 'H',
+            '&H': 'H',
+            '&': ';'
+        }
+        rep = dict((re.escape(k), v)
+                   for k, v in rep.items())
+        pattern = re.compile("|".join(rep.keys()))
+        symbol = pattern.sub(lambda m: rep[re.escape(m.group(0))], symbol)
+        return symbol
+
+    @staticmethod
+    def _GetStrictAtomSmarts(atom):
+        ''' Copy from Rdchiral.
+        For an RDkit atom object, generate a SMARTS pattern that
+        matches the atom as strictly as possible
+        '''
+        symbol = atom.GetSmarts()
+        if atom.GetSymbol() == 'H':
+            symbol = '[#1]'
+
+        if '[' not in symbol:
+            symbol = '[' + symbol + ']'
+
+        if 'H' not in symbol:
+            H_symbol = 'H{}'.format(atom.GetTotalNumHs())
+            # Explicit number of hydrogens: include "H0" when no hydrogens present
+            if ':' in symbol:  # stick H0 before label
+                symbol = symbol.replace(':', ';{}:'.format(H_symbol))
+            else:
+                symbol = symbol.replace(']', ';{}]'.format(H_symbol))
+
+        # Explicit degree
+        if ':' in symbol:
+            symbol = symbol.replace(':', ';D{}:'.format(atom.GetDegree()))
+        else:
+            symbol = symbol.replace(']', ';D{}]'.format(atom.GetDegree()))
+
+        # Explicit formal charge
+        if '+' not in symbol and '-' not in symbol:
+            charge = atom.GetFormalCharge()
+            charge_symbol = '+' if (charge >= 0) else '-'
+            charge_symbol += '{}'.format(abs(charge))
+            if ':' in symbol:
+                symbol = symbol.replace(':', ';{}:'.format(charge_symbol))
+            else:
+                symbol = symbol.replace(']', ';{}]'.format(charge_symbol))
+
+        return symbol
+
+    @staticmethod
+    def _GetGeneralAtomSmarts(atom):
+        '''Copy from Rdchiral.
+        This function takes an RDKit atom and turns it into a wildcard
+        using heuristic generalization rules. This function should be used
+        when candidate atoms are used to extend the reaction core for higher
+        generalizability
+        '''
+        # Is this a terminal atom? We can tell if the degree is one
+        if atom.GetDegree() == 1:
+            symbol = '[' + atom.GetSymbol() + ';D1;H{}'.format(
+                atom.GetTotalNumHs())
+            if atom.GetFormalCharge() != 0:
+                charges = re.search('([-+]+[1-9]?)', atom.GetSmarts())
+                symbol = symbol.replace(';D1', ';{};D1'.format(charges.group()))
+
+        else:
+            # Initialize
+            symbol = '['
+
+            # Add atom primitive - atomic num and aromaticity (don't use COMPLETE wildcards)
+            if atom.GetAtomicNum() != 6:
+                symbol += '#{};'.format(atom.GetAtomicNum())
+                if atom.GetIsAromatic():
+                    symbol += 'a;'
+            elif atom.GetIsAromatic():
+                symbol += 'c;'
+            else:
+                symbol += 'C;'
+
+            # Charge is important
+            if atom.GetFormalCharge() != 0:
+                charges = re.search('([-+]+[1-9]?)', atom.GetSmarts())
+                if charges: symbol += charges.group() + ';'
+
+            # Strip extra semicolon
+            if symbol[-1] == ';': symbol = symbol[:-1]
+
+        # Close with label or with bracket
+        label = re.search('\:[0-9]+\]', atom.GetSmarts())
+        if label:
+            symbol += label.group()
+        else:
+            symbol += ']'
+        return symbol
 
     @staticmethod
     def _RemoveAtomMap(mol):
