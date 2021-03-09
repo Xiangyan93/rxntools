@@ -4,7 +4,8 @@ import warnings
 import copy
 import numpy as np
 from rdkit.Chem import rdChemReactions
-from.substructure import *
+from .substructure import *
+ChiralType = Chem.rdchem.ChiralType
 
 
 class Base:
@@ -53,7 +54,8 @@ class Base:
         if self.is_template:
             reactants_smarts = self._Frag2CanonicalSmarts(self.reactants)
             reactants_smarts = self._AddChiralOnSmarts(
-                reactants_smarts, self.reactants_chirality_record)
+                reactants_smarts,
+                self.reactants_chirality_record)
             products_smarts = self._Frag2CanonicalSmarts(self.products)
             products_smarts = self._AddChiralOnSmarts(
                 products_smarts, self.products_chirality_record)
@@ -181,15 +183,46 @@ class Base:
             Chem.SanitizeMol(mol)
 
     def _AddChiralOnSmarts(self, smarts, chirality_record):
-        for mp, record in chirality_record.items():
-            seq = re.findall(':(%s)]' % '|'.join(record[1]), smarts)
-            if self._IsChiralRecordChange(record[1], seq):
-                smarts = smarts.replace(':%d]' % mp,
-                                        ';%s:%d]' % (record[0].reverse, mp))
+        for mn, chiral_tag in chirality_record.items():
+            # get atom smarts
+            a_smarts = re.search('\[[A-Za-z0-9@:;&\+]+:%d]' % mn, smarts)[0]
+            assert ('@' not in a_smarts)
+            # get element string
+            element = re.sub('[\[\]HD0-9:;&\+\-]', '', a_smarts)
+            assert (element in ['C', 'S', 'Si'])
+            # try to insert chirality to smarts.
+            for tag in ['@', '@@']:
+                a_smarts_ = a_smarts[:len(element) + 1] + tag + \
+                            a_smarts[len(element) + 1:]
+                new_smarts = smarts.replace(a_smarts, a_smarts_)
+                mol = Chem.MolFromSmarts(new_smarts)
+                atom = self._GetAtomFromMapNumber([mol], mn)
+                if atom.GetChiralTag() == chiral_tag:
+                    smarts = new_smarts
+                    break
             else:
-                smarts = smarts.replace(':%d]' % mp,
-                                        ';%s:%d]' % (record[0].value, mp))
+                raise RuntimeError('Cannot correctly assign chirality on'
+                                   f'atom %d in {smarts}' % mn)
         return smarts
+        """
+            #atom = self._GetAtomFromMapNumber(mols, mn)
+
+            #seq = re.findall(':(%s)]' % '|'.join(record[1]), smarts)
+
+            # only C S Si N+ have chirality
+            if self._IsChiralRecordChange(record[1], seq):
+                if a_smarts[1:3] == 'Si':
+                    a_smarts_ = a_smarts[:3] + record[0].reverse + a_smarts[3:]
+                else:
+                    a_smarts_ = a_smarts[:2] + record[0].reverse + a_smarts[2:]
+            else:
+                if a_smarts[1:3] == 'Si':
+                    a_smarts_ = a_smarts[:3] + record[0].value + a_smarts[3:]
+                else:
+                    a_smarts_ = a_smarts[:2] + record[0].value + a_smarts[2:]
+            smarts = smarts.replace(a_smarts, a_smarts_)
+        return smarts
+        """
 
     def _CanonicalizeMol(self, mol, depth):
         """ Reorder the atoms sequence in mol, this is helpful to make the output
@@ -272,19 +305,18 @@ class Base:
         for mol in mols:
             for atom in mol.GetAtoms():
                 if atom.GetChiralTag() != Chem.rdchem.ChiralType.CHI_UNSPECIFIED:
-                    if atom.GetPropsAsDict().get('molAtomMapNumber') is not None:
-                        acr = self._GetAtomChiralityRecord(atom, category)
-                        if acr is None:
-                            warnings.warn('Neighbors of chiral atom '
-                                          f'{atom.GetSmarts()} in %s are not '
-                                          'labeled, clear the ChiralTag.'
-                                          % category)
-                            warnings.warn(f'reaction smarts: {self.reaction_smarts}')
-                            atom.SetChiralTag(Chem.rdchem.ChiralType.CHI_UNSPECIFIED)
-                        else:
-                            chirality_record[acr[0]] = [acr[1], acr[2]]
+                    AMN = atom.GetPropsAsDict().get('molAtomMapNumber')
+                    if AMN is not None:
+                        chirality_record[AMN] = atom.GetChiralTag()
+                    else:
+                        warnings.warn(f'Chiral atom {atom.GetSmarts()} in %s is '
+                                      f'not labeled, clear the ChiralTag. '
+                                      f'reaction smarts: '
+                                      f'{self.reaction_smarts}.' % category)
+                        atom.SetChiralTag(ChiralType.CHI_UNSPECIFIED)
         return chirality_record
 
+    """
     def _GetAtomChiralityRecord(self, atom, category):
         neighbors_mn = []
         for neighbor in atom.GetNeighbors():
@@ -302,7 +334,7 @@ class Base:
         # there is a hydrogen
         if len(neighbors_mn) == 3:
             neighbors_mn.append(str(atom_mp))
-        atom_smarts = re.search('\[[0-9A-Za-z@:;&]+:%d]' % atom_mp,
+        atom_smarts = re.search('\[[0-9A-Za-z@:;&\+]+:%d]' % atom_mp,
                                 smarts_string)[0]
         if '@@' in atom_smarts:
             record1 = ChiralTag('@@')
@@ -312,7 +344,7 @@ class Base:
             record1 = None
         record2 = re.findall(':(%s)]' % '|'.join(neighbors_mn), smarts_string)
         return atom_mp, record1, record2
-
+    """
     def _GetReactingAtomsMN(self, depth):
         """
 
@@ -363,6 +395,10 @@ class Base:
 
     @staticmethod
     def _IsChiralRecordChange(record1, record2):
+        """
+        If the neighbors exchange even time, do not change chiral tag.
+        If the neighbors exchange odd time, change chiral tag.
+        """
         N_permutation = 0
         for i in range(len(record1)):
             index = record2.index(record1[i])
@@ -373,6 +409,20 @@ class Base:
             return False
         else:
             return True
+        """
+        The chirality in RDKit is defined as: for a chiral atom A and its
+        neighbors atoms B, C, D, E. In the view from A to B, the atom map number
+        of C, D, E is ordered clockwise (@@) or counter clockwise(@).
+        """
+
+        """
+        N1 = sorted(record1).index(record1[0])
+        N2 = sorted(record2).index(record2[0])
+        if (N1 & 1 == 0 and N2 & 1 == 0) or (N1 & 1 == 1 and N2 & 1 == 1):
+            return False
+        else:
+            return True
+        """
 
     @staticmethod
     def _IsReactMol(mol, ReactingAtoms):
@@ -425,12 +475,12 @@ class Base:
             for atom in mol.GetAtoms():
                 atoms_to_use.append(atom.GetIdx())
                 symbols.append(atom.GetSmarts().replace('&', ';'))
-            fragments.append('(' + Chem.MolFragmentToSmiles(
+            fragments.append(Chem.MolFragmentToSmiles(
                 mol, atoms_to_use,
                 atomSymbols=symbols,
                 allHsExplicit=True,
                 isomericSmiles=True,
-                allBondsExplicit=True) + ')')
+                allBondsExplicit=True))
         fragments.sort()
         return '.'.join(fragments)
 
@@ -462,6 +512,19 @@ class Base:
 
         if '[' not in symbol:
             symbol = '[' + symbol + ']'
+
+        # Explicit stereochemistry - *before* H
+        if atom.GetChiralTag() != ChiralType.CHI_UNSPECIFIED:
+            if '@' not in symbol:
+                # Be explicit when there is a tetrahedral chiral tag
+                if atom.GetChiralTag() == Chem.rdchem.ChiralType.CHI_TETRAHEDRAL_CCW:
+                    tag = '@'
+                elif atom.GetChiralTag() == Chem.rdchem.ChiralType.CHI_TETRAHEDRAL_CW:
+                    tag = '@@'
+                if ':' in symbol:
+                    symbol = symbol.replace(':', ';{}:'.format(tag))
+                else:
+                    symbol = symbol.replace(']', ';{}]'.format(tag))
 
         if 'H' not in symbol:
             H_symbol = 'H{}'.format(atom.GetTotalNumHs())
