@@ -92,7 +92,15 @@ class ChemicalReaction(Base):
                             atoms_to_use.append(atom.GetIdx())
                             # Make the expansion a wildcard
                             symbol_replacements.append(
-                                (atom.GetIdx(), self._GetGeneralAtomSmarts(atom)))
+                                (atom.GetIdx(),
+                                 self._GetGeneralAtomSmarts(atom)))
+
+                # Make sure unmapped atoms are included (from products)
+                for atom in mol.GetAtoms():
+                    if not atom.HasProp('molAtomMapNumber'):
+                        atoms_to_use.append(atom.GetIdx())
+                        symbol = self._GetStrictAtomSmarts(atom)
+                        symbol_replacements.append((atom.GetIdx(), symbol))
 
             # Define new symbols to replace terminal species with wildcards
             # (don't want to restrict templates too strictly)
@@ -103,12 +111,12 @@ class ChemicalReaction(Base):
             if not atoms_to_use:
                 continue
 
-            fragments.append('(' + Chem.MolFragmentToSmiles(
+            fragments.append(Chem.MolFragmentToSmiles(
                 mol, atoms_to_use,
                 atomSymbols=symbols,
                 allHsExplicit=True,
                 isomericSmiles=True,
-                allBondsExplicit=True) + ')')
+                allBondsExplicit=True))
         fragments.sort()
         return '.'.join(fragments)
 
@@ -123,9 +131,11 @@ class ChemicalReaction(Base):
                 (range(4), 'S(O)(O)[Cl]',),  # sulfonyl chloride
                 (range(3), 'B(O)O',),  # boronic acid/ester
                 ((0,), '[Si](C)(C)C'),  # trialkyl silane
-                ((0,), '[Si](OC)(OC)(OC)'),  # trialkoxy silane, default to methyl
+                ((0,), '[Si](OC)(OC)(OC)'),
+                # trialkoxy silane, default to methyl
                 (range(3), '[N;H0;$(N-[#6]);D2]-,=[N;D2]-,=[N;D1]',),  # azide
-                (range(8), 'O=C1N([Br,I,F,Cl])C(=O)CC1',),  # NBS brominating agent
+                (range(8), 'O=C1N([Br,I,F,Cl])C(=O)CC1',),
+                # NBS brominating agent
                 (range(11), 'Cc1ccc(S(=O)(=O)O)cc1'),  # Tosyl
                 ((7,), 'CC(C)(C)OC(=O)[N]'),  # N(boc)
                 ((4,), '[CH3][CH0]([CH3])([CH3])O'),  #
@@ -154,7 +164,8 @@ class ChemicalReaction(Base):
             group_templates += [
                 ((1, 2,), '[*]/[CH]=[CH]/[*]'),  # trans with two hydrogens
                 ((1, 2,), '[*]/[CH]=[CH]\[*]'),  # cis with two hydrogens
-                ((1, 2,), '[*]/[CH]=[CH0]([*])\[*]'),  # trans with one hydrogens
+                ((1, 2,), '[*]/[CH]=[CH0]([*])\[*]'),
+                # trans with one hydrogens
                 ((1, 2,), '[*]/[D3;H1]=[!D1]'),
                 # specified on one end, can be N or C
             ]
@@ -251,7 +262,19 @@ class ChemicalReaction(Base):
         return expansion
 
     # # Functions to automatically correct reactions.
-    # Fix chiral issue.
+    # treat chirality.
+    def DeleteChirality(self, non_reacting=True, reacting=False):
+        reacting_atoms = self._GetReactingAtomsMN(0)
+        for mol in self.reactants + self.products:
+            for atom in mol.GetAtoms():
+                if atom.GetChiralTag() != ChiralType.CHI_UNSPECIFIED:
+                    AMN = atom.GetPropsAsDict().get('molAtomMapNumber')
+                    if AMN is None \
+                            or (AMN in reacting_atoms and reacting) \
+                            or (AMN not in reacting_atoms and non_reacting):
+                        atom.SetChiralTag(ChiralType.CHI_UNSPECIFIED)
+        self.GetChiralityInfo()
+
     def FixChiralityInfo(self, rule):
         if rule == 'complete':
             self.__CompleteMissingChirality()
@@ -300,22 +323,28 @@ class ChemicalReaction(Base):
     def __ModifyMissingChirality(self, records1, records2, category2, rule):
         mols = self.reactants if category2 == 'reactant' else self.products
         delete_keys = []
-        for mn, record in records1.items():
-            if mn not in records2:
-                atom_unchiral = self._GetAtomFromMapNumber(
-                    mols, mn)
-                acr = self._GetAtomChiralityRecord(atom_unchiral,
-                                                   category2)
-                if acr is None:
+        for mn, chiral_tag in records1.items():
+            if mn not in records2 and mn not in self.ReactingAtomsMN:
+                atom_untag = self._GetAtomFromMapNumber(mols, mn)
+                if rule == 'complete':
+                    atom_untag.SetChiralTag(chiral_tag)
+                    records2[mn] = chiral_tag
+                elif rule == 'delete':
+                    atom_untag.SetChiralTag(ChiralType.CHI_UNSPECIFIED)
                     delete_keys.append(mn)
-                elif '.'.join(list(map(str, record[1]))) == \
-                        '.'.join(list(map(str, acr[2]))):
-                    if rule == 'complete':
-                        records2[mn] = record
-                    elif rule == 'delete':
-                        delete_keys.append(mn)
         for key in delete_keys:
             records1.pop(key)
+
+    # Check whether the reaction is good.
+    def Check(self):
+        assert (self.IsGoodSmarts() is True)
+        assert (self.IsTrivial() is False)
+        assert (self.IsRepeatMapNumber(self.reactants) is False)
+        assert (self.IsRepeatMapNumber(self.products) is False)
+
+    # Check whether the output canonical smarts keep identical.
+    def IsGoodSmarts(self):
+        return ChemicalReaction(self.Smarts).Smarts == self.Smarts
 
     # Check whether the reaction is trivial
     def IsTrivial(self):
@@ -324,6 +353,17 @@ class ChemicalReaction(Base):
         else:
             return False
 
-    # Check whether the output canonical smarts keep identical.
-    def Check(self):
-        assert (ChemicalReaction(self.Smarts).Smarts == self.Smarts)
+    @staticmethod
+    # Check whether there are repeated map number
+    def IsRepeatMapNumber(mols):
+        map_numbers = []
+        for mol in mols:
+            for atom in mol.GetAtoms():
+                AMN = atom.GetPropsAsDict().get('molAtomMapNumber')
+                if AMN is None:
+                    continue
+                if AMN not in map_numbers:
+                    map_numbers.append(AMN)
+                else:
+                    return True
+        return False
